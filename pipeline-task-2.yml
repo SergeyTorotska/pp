@@ -1,0 +1,150 @@
+schedules:
+- cron: "0 22 * * Mon-Sun"
+  displayName: 'Monday-Sunday 10:00 PM (UTC) daily build'
+  branches:
+    include: 
+    - dev
+
+pool: Azure pipeline
+
+steps:
+  - task: SqlAzureDacpacDeployment@1
+    displayName: 'Clear Database'
+    inputs:
+      AuthenticationType: 'connectionString'
+      ConnectionString: '$(ConnectionStrings__DefaultConnection)'
+      deployType: 'InlineSqlTask'
+      SqlInline: |
+       -- Drop all Foreign Key constraints 
+        DECLARE @name VARCHAR(128)
+        DECLARE @constraint VARCHAR(254)
+        DECLARE @SQL VARCHAR(254)
+      
+      
+        SELECT @name = (SELECT TOP 1 TABLE_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE constraint_catalog=DB_NAME() AND CONSTRAINT_TYPE = 'FOREIGN KEY' ORDER BY TABLE_NAME)
+
+        WHILE @name is not null
+        BEGIN
+        SELECT @constraint = (SELECT TOP 1 CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE constraint_catalog=DB_NAME() AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND TABLE_NAME = @name ORDER BY CONSTRAINT_NAME)
+        WHILE @constraint IS NOT NULL
+        BEGIN
+        SELECT @SQL = 'ALTER TABLE [dbo].[' + RTRIM(@name) +'] DROP CONSTRAINT [' + RTRIM(@constraint) +']'
+        EXEC (@SQL)
+        PRINT 'Dropped FK Constraint: ' + @constraint + ' on ' + @name
+        SELECT @constraint = (SELECT TOP 1 CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE constraint_catalog=DB_NAME() AND CONSTRAINT_TYPE = 'FOREIGN KEY' AND CONSTRAINT_NAME <> @constraint AND TABLE_NAME = @name ORDER BY CONSTRAINT_NAME)
+        END
+        SELECT @name = (SELECT TOP 1 TABLE_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE constraint_catalog=DB_NAME() AND CONSTRAINT_TYPE = 'FOREIGN KEY' ORDER BY TABLE_NAME)
+        END
+        GO
+      
+      
+       -- Disable system versioning 
+        DECLARE @name VARCHAR(128)
+        DECLARE @constraint VARCHAR(254)
+        DECLARE @SQL VARCHAR(254)
+      
+        SELECT @name = (SELECT TOP 1 t.name FROM sys.tables t LEFT JOIN sys.tables h ON t.history_table_id = h.object_id WHERE t.temporal_type = 2)
+      
+        WHILE @name IS NOT NULL
+        BEGIN
+        SELECT @SQL = 'ALTER TABLE [dbo].[' + RTRIM(@name) +'] SET (SYSTEM_VERSIONING = OFF);'
+        EXEC (@SQL)
+        PRINT 'Disabled system versioning for: ' + @name
+        SELECT @name = (SELECT TOP 1 t.name FROM sys.tables t LEFT JOIN sys.tables h ON t.history_table_id = h.object_id WHERE t.temporal_type = 2)
+        END
+        GO
+      
+        -- Drop all tables 
+        DECLARE @name VARCHAR(128)
+        DECLARE @SQL VARCHAR(254)
+      
+        SELECT @name = (SELECT TOP 1 [name] FROM sysobjects WHERE [type] = 'U' AND category = 0 ORDER BY [name])
+      
+        WHILE @name IS NOT NULL
+        BEGIN
+        SELECT @SQL = 'DROP TABLE [dbo].[' + RTRIM(@name) +']'
+        EXEC (@SQL)
+        PRINT 'Dropped Table: ' + @name
+        SELECT @name = (SELECT TOP 1 [name] FROM sysobjects WHERE [type] = 'U' AND category = 0 AND [name] > @name ORDER BY [name])
+        END
+        GO
+      
+        -- Drop all views 
+        DECLARE @name VARCHAR(128)
+        DECLARE @SQL VARCHAR(254)
+      
+        SELECT @name = (SELECT TOP 1 [name] FROM sysobjects WHERE [type] = 'V' AND category = 0 ORDER BY [name])
+      
+        WHILE @name IS NOT NULL
+        BEGIN
+        SELECT @SQL = 'DROP VIEW [dbo].[' + RTRIM(@name) +']'
+        EXEC (@SQL)
+        PRINT 'Dropped View: ' + @name
+        SELECT @name = (SELECT TOP 1 [name] FROM sysobjects WHERE [type] = 'V' AND category = 0 AND [name] > @name ORDER BY [name])
+        END
+        GO
+      
+        -- Drop all sequences 
+        DECLARE @name VARCHAR(128)
+        DECLARE @SQL VARCHAR(254)
+      
+        SELECT @name = (SELECT TOP 1 [name] FROM sys.sequences ORDER BY [name])
+      
+        WHILE @name IS NOT NULL
+        BEGIN
+        SELECT @SQL = 'DROP SEQUENCE [dbo].[' + RTRIM(@name) +']'
+        EXEC (@SQL)
+        PRINT 'Dropped Sequence: ' + @name
+        SELECT @name = (SELECT TOP 1 [name] FROM sys.sequences WHERE [name] > @name ORDER BY [name])
+        END
+        GO
+    IpDetectionMethod: 'AutoDetect'
+    
+  - task: DotNetCoreCLI@2
+    displayName: 'dotnet restore'
+    inputs:
+      command: restore
+      projects: '**/*.sln'
+      vstsFeed: '255f8b5e-0d73-4208-a824-b04c39407d41'
+  - task: DotNetCoreCLI@2
+    displayName: 'dotnet build'
+    inputs:
+      projects: '**/*.sln'
+      arguments: '--configuration Release'
+  - task: DotNetCoreCLI@2
+    displayName: 'dotnet test (unit)'
+    inputs:
+      command: test
+      projects: 'tests/Unit/**/*.csproj'
+      arguments: '--configuration $(buildConfiguration) /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:ExcludeByFile="$(Build.SourcesDirectory/src/Database/HF.RealityStone.Database.Migrations/**/*"'
+  - task: DotNetCoreCLI@2
+    displayName: 'dotnet test (integration)'
+    inputs:
+      command: test
+      projects: 'tests/Integration/**/*.csproj'
+      arguments: '-v d --configuration $(buildConfiguration) /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:ExcludeByFile="$(Build.SourcesDirectory)/src/Database/HF.RealityStone.Database.Migrations/**/*"'
+  - task: DotNetCoreCLI@2
+    displayName: 'dotnet publish'
+    inputs:
+      command: publish
+      arguments: '--output $(Build.ArtifactStagingDirectory)'
+      zipAfterPublish: true
+  - task: reportgenerator@4
+    displayName: 'ReportGenerator'
+    inputs:
+      reports: '$(Build.SourcesDirectory)/**/*.cobertura.xml'
+      targetdir: '$(Build.SourcesDirectory)/TestResults/Coverage/'
+  
+  - task: PublishCodeCoverageResults@1
+    displayName: 'Publish code coverage from $(Build.SourcesDirectory)/TestResults/Coverage/Cobertura.xml'
+    inputs:
+      codeCoverageTool: Cobertura
+      summaryFileLocation: '$(Build.SourcesDirectory)/TestResults/Coverage/Cobertura.xml'
+  
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: drop'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+      ArtifactName: 'drop'
+      publishLocation: 'Container'
+      
