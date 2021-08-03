@@ -9,7 +9,7 @@ pool: Azure Pipeline
 
 stages:
 
-- template: build-template.yml .yml@templates
+- template: build-template.yml@templates
 
 - stage: Publish
   jobs:
