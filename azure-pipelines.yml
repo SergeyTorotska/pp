@@ -2,7 +2,7 @@ resources:
  repositories:
  - repository: templates
    type: git
-   name: test
+   name:  SergeyTorotska/test
 
 pool: Azure Pipeline
 
